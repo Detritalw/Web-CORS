@@ -38,6 +38,7 @@ LISTEN_HOST = _cfg.get("server", "listen_host", fallback="127.0.0.1")
 LISTEN_PORT = _cfg.getint("server", "listen_port", fallback=8080)
 AUTH_TOKEN = _cfg.get("auth", "token", fallback="")
 ALLOW_ALL_ORIGINS = _cfg.getboolean("cors", "allow_all_origins", fallback=False)
+ALLOW_LOCALHOST = _cfg.getboolean("targets", "allow_localhost", fallback=False)
 ALLOWED_ORIGINS = {
     o.strip() for o in _cfg.get("cors", "allowed_origins", fallback="").split(",") if o.strip()
 }
@@ -100,6 +101,10 @@ def target_allowed(url: str) -> bool:
     if not m:
         return False
     scheme, host, port, _rest = m.groups()
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        if not ALLOW_LOCALHOST:
+            return False
+        return scheme in ("http", "https")
     port = port or ("443" if scheme == "https" else "80")
     if not any(
         re.fullmatch(s, scheme) and re.fullmatch(h, host) and re.fullmatch(p, port)

@@ -1,6 +1,6 @@
 # Web-CORS
 
-一个基于 Python `aiohttp` 的本地 CORS 反向代理，支持密码认证、目标白名单、重定向校验、请求限流和内网地址拦截。
+一个基于 Python `aiohttp` 的本地 CORS 反向代理，支持密码认证、目标白名单、重定向校验、请求限流和内网地址拦截。支持配置 localhost 转发，但默认关闭。
 
 ## 运行
 
@@ -11,6 +11,14 @@ cp config.example.ini config.ini
 # 编辑 config.ini，设置随机 token
 venv/bin/python proxy.py
 ```
+
+如需转发本机服务，在 `config.ini` 的 `[targets]` 中显式设置：
+
+```ini
+allow_localhost = true
+```
+
+然后重启 systemd 服务。该开关默认是 `false`，不会转发 `localhost` 或 `localhost.localdomain`。
 
 代理支持两种目标地址格式：
 

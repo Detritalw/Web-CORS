@@ -52,6 +52,8 @@ if not TARGETS_RAW:
     sys.exit(1)
 
 TARGET_RULES = []  # (scheme_re, host_re, port_re)
+CONTEXT_TARGET_COOKIE = "__cors_target"
+CONTEXT_AUTH_COOKIE = "__cors_auth"
 for entry in TARGETS_RAW:
     m = re.match(r"^(https?)://([^/:]+)(?::(\d+|\*))?$", entry)
     if not m:
@@ -158,6 +160,10 @@ def check_auth(request: web.Request) -> bool:
     # cannot attach an Authorization header. The service only listens locally.
     if not auth:
         auth = request.query.get("key", "")
+    if not auth:
+        auth_cookie = request.cookies.get(CONTEXT_AUTH_COOKIE)
+        if auth_cookie:
+            auth = auth_cookie
     return auth == AUTH_TOKEN
 
 
@@ -213,9 +219,15 @@ async def forward(request: web.Request, method: str) -> web.Response:
     # Support the browser client's query format: /?url=<encoded-target>&key=...
     # while retaining the canonical path format: /https://host/path.
     target_url = raw or request.query.get("url", "")
+    if not target_url and request.cookies.get(CONTEXT_TARGET_COOKIE):
+        target_url = request.cookies[CONTEXT_TARGET_COOKIE]
     if not target_url:
         return denied(request, 400, "usage: /<scheme>://host[:port]/path or /?url=<target>")
 
+    context_target = request.cookies.get(CONTEXT_TARGET_COOKIE)
+    if context_target and raw and not raw.startswith(("http://", "https://")) and not request.query.get("url"):
+        base = URL(context_target)
+        target_url = str(base.with_path(raw if raw.startswith("/") else "/" + raw))
     target_url = target_url
     # tolerate callers that omit the scheme separator when encoded
     if not target_url.startswith(("http://", "https://")):
@@ -239,7 +251,15 @@ async def forward(request: web.Request, method: str) -> web.Response:
             continue
         fwd_headers[k] = v
     if request.headers.get("Cookie"):
-        fwd_headers["Cookie"] = request.headers["Cookie"]
+        proxy_cookies = SimpleCookie()
+        proxy_cookies.load(request.headers["Cookie"])
+        target_cookie = proxy_cookies.pop(CONTEXT_TARGET_COOKIE, None)
+        proxy_cookies.pop(CONTEXT_AUTH_COOKIE, None)
+        if target_cookie:
+            target_url = target_cookie.value
+        if proxy_cookies.output(header="", sep=";"):
+            fwd_headers["Cookie"] = proxy_cookies.output(header="", sep=";").strip()
+    target_url = target_url.strip()
 
     session: aiohttp.ClientSession = request.app["upstream_session"]
     url = target_url
@@ -286,6 +306,16 @@ async def forward(request: web.Request, method: str) -> web.Response:
                 response = web.Response(status=resp.status, body=data, headers=out_headers)
                 for cookie in set_cookies:
                     response.headers.add("Set-Cookie", cookie)
+                # Persist target and auth context on the proxy origin so
+                # relative scripts, API calls, and assets stay proxied.
+                response.headers.add(
+                    "Set-Cookie",
+                    f"{CONTEXT_TARGET_COOKIE}={URL(target_url).human_repr()}; Path=/; HttpOnly; SameSite=Lax",
+                )
+                response.headers.add(
+                    "Set-Cookie",
+                    f"{CONTEXT_AUTH_COOKIE}={AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Lax",
+                )
                 return response
         return denied(request, 502, "too many redirects")
     except aiohttp.ClientError as e:

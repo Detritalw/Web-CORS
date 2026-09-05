@@ -1,0 +1,21 @@
+[Unit]
+Description=CORS Proxy (password-protected, target whitelist)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/data/Web-CORS/venv/bin/python /data/Web-CORS/proxy.py
+WorkingDirectory=/data/Web-CORS
+Restart=on-failure
+RestartSec=3
+User=corsproxy
+Group=corsproxy
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

@@ -239,6 +239,7 @@ async def forward(request: web.Request, method: str) -> web.Response:
             async with session.request(
                 method, url, data=body if method not in ("GET", "HEAD") else None,
                 headers=fwd_headers, allow_redirects=False, timeout=CLIENT_TIMEOUT,
+                auto_decompress=False,
             ) as resp:
                 if resp.status in (301, 302, 303, 307, 308):
                     loc = resp.headers.get("Location")

@@ -15,7 +15,10 @@ import re
 import socket
 import sys
 import time
+from html import escape
+from html.parser import HTMLParser
 from http.cookies import SimpleCookie
+from urllib.parse import quote, urljoin, urlsplit
 from collections import defaultdict
 from pathlib import Path
 
@@ -120,6 +123,7 @@ def target_allowed(url: str) -> bool:
 MAX_BODY_BYTES = 10 * 1024 * 1024
 CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=90, connect=10, sock_read=60)
 MAX_REDIRECTS = 5
+MAX_HTML_REWRITE_BYTES = 5 * 1024 * 1024
 RATE_MAX = 120
 RATE_WINDOW = 60  # seconds
 HOP_BY_HOP = {
@@ -194,6 +198,65 @@ def cors_headers(request: web.Request, allow_methods: str | None = None) -> dict
     return h
 
 
+def proxy_url(proxy_origin: str, target: str, auth: str) -> str:
+    return f"{proxy_origin}/?url={quote(target, safe='')}&key={quote(auth, safe='')}"
+
+
+def rewrite_html(html: str, target_url: str, proxy_origin: str) -> str:
+    """Rewrite navigable HTML URLs so document subrequests stay proxied."""
+    base = target_url
+    parsed_proxy = urlsplit(proxy_origin)
+
+    def rewrite(value: str, *, allow_data: bool = True) -> str:
+        value = value.strip()
+        if not value or value.startswith(("#", "javascript:", "mailto:", "tel:", "data:")):
+            return value
+        absolute = urljoin(base, value)
+        parts = urlsplit(absolute)
+        if parts.scheme not in ("http", "https"):
+            return value
+        if parts.hostname == parsed_proxy.hostname and parts.port == parsed_proxy.port:
+            return absolute
+        return f"{proxy_origin}/?url={URL(absolute).human_repr()}&key={AUTH_TOKEN}"
+
+    class Rewriter(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=False)
+            self.out = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs_out = []
+            for key, value in attrs:
+                if value is not None and key.lower() in {"href", "src", "action", "poster", "cite", "formaction"}:
+                    value = rewrite(value)
+                attrs_out.append((key, value))
+            rendered = "<" + tag
+            for key, value in attrs_out:
+                rendered += " " + key
+                if value is not None:
+                    rendered += '=\"' + escape(value, quote=True) + '\"'
+            self.out.append(rendered + ">")
+
+        def handle_startendtag(self, tag, attrs):
+            self.handle_starttag(tag, attrs)
+            self.out[-1] = self.out[-1][:-1] + "/>"
+
+        def handle_endtag(self, tag):
+            self.out.append(f"</{tag}>")
+
+        def handle_data(self, data): self.out.append(data)
+        def handle_entityref(self, name): self.out.append(f"&{name};")
+        def handle_charref(self, name): self.out.append(f"&#{name};")
+        def handle_comment(self, data): self.out.append(f"<!--{data}-->")
+        def handle_decl(self, decl): self.out.append(f"<!{decl}>")
+        def handle_pi(self, data): self.out.append(f"<?{data}>")
+
+    parser = Rewriter()
+    parser.feed(html)
+    parser.close()
+    return "".join(parser.out)
+
+
 def denied(request: web.Request, status: int, msg: str) -> web.Response:
     return web.json_response({"error": msg}, status=status, headers=cors_headers(request))
 
@@ -259,6 +322,7 @@ async def forward(request: web.Request, method: str) -> web.Response:
             target_url = target_cookie.value
         if proxy_cookies.output(header="", sep=";"):
             fwd_headers["Cookie"] = proxy_cookies.output(header="", sep=";").strip()
+    fwd_headers["Accept-Encoding"] = "identity"
     target_url = target_url.strip()
 
     session: aiohttp.ClientSession = request.app["upstream_session"]
@@ -303,6 +367,18 @@ async def forward(request: web.Request, method: str) -> web.Response:
                         morsel["samesite"] = "Lax"
                         set_cookies.append(morsel.OutputString())
                 data = await resp.read()
+                content_type = resp.headers.get("Content-Type", "")
+                if (
+                    method in ("GET", "HEAD")
+                    and len(data) <= MAX_HTML_REWRITE_BYTES
+                    and "text/html" in content_type.lower()
+                ):
+                    try:
+                        data = rewrite_html(data.decode(resp.charset or "utf-8", errors="replace"), target_url, f"{request.scheme}://{request.host}").encode("utf-8")
+                        out_headers["Content-Type"] = "text/html; charset=utf-8"
+                        out_headers.pop("Content-Length", None)
+                    except (UnicodeError, ValueError):
+                        log.exception("failed to rewrite HTML response from %s", target_url)
                 response = web.Response(status=resp.status, body=data, headers=out_headers)
                 for cookie in set_cookies:
                     response.headers.add("Set-Cookie", cookie)

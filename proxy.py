@@ -15,6 +15,7 @@ import re
 import socket
 import sys
 import time
+from http.cookies import SimpleCookie
 from collections import defaultdict
 from pathlib import Path
 
@@ -225,12 +226,15 @@ async def forward(request: web.Request, method: str) -> web.Response:
     if len(body) > MAX_BODY_BYTES:
         return denied(request, 413, "body too large")
 
-    # forward headers minus hop-by-hop / auth / cookie
+    # Forward browser cookies to the upstream target. Keep proxy auth and
+    # browser-origin headers private to the proxy.
     fwd_headers = {}
     for k, v in request.headers.items():
-        if k.lower() in HOP_BY_HOP or k.lower() in ("authorization", "cookie", "origin", "referer"):
+        if k.lower() in HOP_BY_HOP or k.lower() in ("authorization", "origin", "referer"):
             continue
         fwd_headers[k] = v
+    if request.headers.get("Cookie"):
+        fwd_headers["Cookie"] = request.headers["Cookie"]
 
     session: aiohttp.ClientSession = request.app["upstream_session"]
     url = target_url
@@ -256,14 +260,28 @@ async def forward(request: web.Request, method: str) -> web.Response:
                     continue  # re-enter loop with new url (validated)
                 # final response
                 out_headers = cors_headers(request)
+                set_cookies = []
                 for k, v in resp.headers.items():
-                    if k.lower() in HOP_BY_HOP or k.lower() in ("content-security-policy",):
+                    if k.lower() in HOP_BY_HOP or k.lower() in ("content-security-policy", "set-cookie"):
                         continue
                     if k.lower() in out_headers:
                         continue
                     out_headers[k] = v
+                for cookie in resp.headers.getall("Set-Cookie", []):
+                    parsed = SimpleCookie()
+                    parsed.load(cookie)
+                    for morsel in parsed.values():
+                        morsel["domain"] = ""
+                        if not morsel["path"]:
+                            morsel["path"] = "/"
+                        morsel["secure"] = ""
+                        morsel["samesite"] = "Lax"
+                        set_cookies.append(morsel.OutputString())
                 data = await resp.read()
-                return web.Response(status=resp.status, body=data, headers=out_headers)
+                response = web.Response(status=resp.status, body=data, headers=out_headers)
+                for cookie in set_cookies:
+                    response.headers.add("Set-Cookie", cookie)
+                return response
         return denied(request, 502, "too many redirects")
     except aiohttp.ClientError as e:
         return denied(request, 502, f"upstream error: {e.__class__.__name__}")

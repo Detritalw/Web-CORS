@@ -25,7 +25,7 @@ venv/bin/python proxy.py
 Authorization: Bearer <token>
 ```
 
-为了兼容无法自定义请求头的 iframe 导航，也支持 `?key=<token>` 查询参数。生产环境建议优先使用请求头认证，因为 URL 可能被访问日志、浏览器历史或监控系统记录。
+为了兼容无法自定义请求头的 iframe 导航，也支持 `?key=<token>` 查询参数。代理会转发浏览器发送的 `Cookie`，并将上游 `Set-Cookie` 的域名改为当前代理域名后返回，以便后续请求继续携带会话。生产环境建议优先使用请求头认证，因为 URL 可能被访问日志、浏览器历史或监控系统记录。
 
 ## systemd
 

@@ -287,7 +287,7 @@ async def forward(request: web.Request, method: str) -> web.Response:
                 out_headers = cors_headers(request)
                 set_cookies = []
                 for k, v in resp.headers.items():
-                    if k.lower() in HOP_BY_HOP or k.lower() in ("content-security-policy", "set-cookie"):
+                    if k.lower() in HOP_BY_HOP or k.lower() in ("content-security-policy", "x-frame-options", "set-cookie"):
                         continue
                     if k.lower() in out_headers:
                         continue
